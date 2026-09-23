@@ -16,6 +16,11 @@ grok upload                # 手动上传 CPA JSON 到 Management API
 
 ---
 
+## 失效说明
+
+由于 xAI 修改了注册机制、提高自动化注册门槛，导致注册机反复失效，以及 grok 号使用 CliProxyAPI 反代时，暴露的 grok-4.5 和 grok-4.6 模型接口实际会被 xAI 后端转发为早期 Grok-1 / 1.5 蒸馏出的轻量 CLI 辅助模型，本身不具备前沿推理能力，在中文理解、逻辑推理、代码生成上表现得很差，所以本项目即日起已停止维护。
+
+
 ## 近期特性
 
 | 特性 | 说明 |
@@ -24,6 +29,7 @@ grok upload                # 手动上传 CPA JSON 到 Management API
 | **Turnstile 屏外有头** | 默认 `TURNSTILE_MODE=offscreen`（非真 headless，降低 600010） |
 | **Castle 空 token** | 当前 `castleRequestToken=""`；风控收紧后再补 offline |
 | **testmail** | `EMAIL_MODE=testmail`，GitHub Student Pack 等 |
+| **cf_temp_email** | 对接 [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) 自建 Worker |
 | **全局座位上限** | `done + reserved ≤ target` |
 | **CPA 上传 wait** | 结束前等待 Management 上传，避免进程先退出 |
 | **一键安装** | 路径/命令名/WARP/结束停容器交互；安全同步（不再误删非空目录） |
@@ -386,14 +392,25 @@ EMAIL_MODE=tempmail
 # TESTMAIL_NAMESPACE=你的_namespace
 # TESTMAIL_DOMAIN=inbox.testmail.app
 
-# 3) 自建域名
+# 3) 自建域名 webhook（Email Routing + 本地 webhook）
 # EMAIL_MODE=custom
 # EMAIL_DOMAIN=example.com
 # EMAIL_API=http://127.0.0.1:8080
+
+# 4) cloudflare_temp_email 自建 Worker
+#    https://github.com/dreamhunter2333/cloudflare_temp_email
+# EMAIL_MODE=cf_temp_email
+# CF_TEMP_EMAIL_API=https://mail-api.example.com
+# CF_TEMP_EMAIL_ADMIN=你的_admin_密码
+# CF_TEMP_EMAIL_DOMAIN=              # 可选；留空=Worker 已配置域名随机/默认
+# CF_TEMP_EMAIL_AUTH=                # 可选 x-custom-auth
+# CF_TEMP_EMAIL_PREFIX=1
 ```
 
 `tempmail` = tempmail.lol + mail.tm 系 fallback，**无需私人 Token**。  
-`testmail` 密钥只写本地 `config.env`，勿提交仓库。
+`testmail` 密钥只写本地 `config.env`，勿提交仓库。  
+`cf_temp_email` 对接 [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email)：用 **admin 建号** `POST /admin/new_address`（`x-admin-auth`）拿地址 JWT，再 `GET /api/parsed_mails` 收信抽验证码；旧部署无 `parsed_mails` 时自动回退 `/api/mails`。  
+**`CF_TEMP_EMAIL_DOMAIN` 可选**：不填则请求不带 domain，由 Worker 按自身 `DOMAINS`/`DEFAULT_DOMAINS` 随机或取默认；填了则固定该后缀。别名：`cf_temp` / `cftemp`。
 
 ### 7. 启动与运维
 
@@ -444,6 +461,82 @@ sudo apt-get install -y xvfb
 - **推荐一键**：先装 Homebrew + Docker Desktop，再 `curl .../install.sh | bash`（见上文）  
 - 手动：`brew install go python`，venv + CloakBrowser，`make build && make install PREFIX=$HOME/.local`  
 - 清障：打开 Docker Desktop 后 `cd ~/Grok-Register/clearance && docker compose up -d`
+
+### Windows / Docker Desktop（推荐路径）
+
+> `grok` 二进制**不能在 Windows 原生编译**（`internal/daemon/daemon.go` 用 `syscall.Flock` / `Setsid` / `SIGTERM/SIGKILL`，Windows 没有 POSIX 信号）。
+> 用 Docker Desktop 跑容器镜像即可，所有 Unix 调用都在 linux/amd64 容器内执行，host 完全不参与。
+
+仓库根有现成的 `Dockerfile` + `docker-compose.yml`，整合了：
+
+- Go 编译的 `grok` 二进制
+- Python venv + Playwright + CloakBrowser Chromium
+- clearance 栈（WARP SOCKS5 + Privoxy HTTP + FlareSolverr）
+- grok 应用容器
+
+```powershell
+# 1) 起栈（首次构建镜像 + 拉取 3 个 clearance 镜像；耐心等几分钟）
+docker compose up -d --build
+docker compose ps
+# 期望：warp / privoxy / flaresolverr healthy，grok-reg Up
+
+# 2) 进入交互 — 与 Linux 完全一致
+docker exec -it grok-reg grok help
+docker exec -it grok-reg grok start -t 10
+docker exec -it grok-reg grok status
+docker exec -it grok-reg grok logs -f
+docker exec -it grok-reg grok stop
+```
+
+**输出文件**：宿主机可直接看到 `./data/`（Windows 资源管理器 `Grok-Register\data`）：
+- `data/config.env` — 首次启动从 `docker/grok-config.env` 拷过去；可手动改后 `docker compose restart grok`
+- `data/outputs/<run_id>/CPA/*.json` — 注册成功可直接拖入 CPA Management
+- `data/outputs/<run_id>/SSO/accounts.txt` — SSO 明细
+- `data/logs/run-*.log` — 完整日志
+
+**一次性前台跑一批（跑完即停、不残留）**：
+```powershell
+docker compose run --rm -e GROK_TARGET=20 grok run
+```
+
+**冒烟测试**（确认 CloakBrowser 在容器里能拿 token）：
+```powershell
+docker exec -it grok-reg sh
+# 容器内：
+/opt/cloakbrowser-venv/bin/python /usr/local/share/grok-reg/turnstile_mint.py \
+  --site-key 0x4AAAAAAAhr9JGVDZbrZOo0 \
+  --url https://accounts.x.ai/sign-up \
+  --proxy http://privoxy:8118 \
+  --timeout 70
+echo exit:$?
+```
+
+**关键约定**（与 Linux 裸跑差异）：
+| 项 | Linux 裸跑 | Docker Desktop Windows |
+|----|------------|-------------------------|
+| `REGISTER_PROXY` | `http://127.0.0.1:40080` | `http://privoxy:8118` |
+| `FLARESOLVERR_URL` | `http://127.0.0.1:8191` | `http://flaresolverr:8191` |
+| `CLEARANCE_PROXY` | `http://privoxy:8118` | `http://privoxy:8118` |
+| Chrome 路径 | `~/.cloakbrowser/...` | `/root/.cloakbrowser/...`（容器内 root） |
+| `GROK_HOME` | `~/.grok` | `/data`（=`host ./data`） |
+| `CPA_MANAGEMENT_BASE` | `http://127.0.0.1:8317/...` | `http://host.docker.internal:8317/...` |
+
+`docker/grok-config.env` 已写好上述约定，默认即用；如要改自覆写 `data/config.env`。
+
+**升级镜像**：
+```powershell
+git pull
+docker compose build grok
+docker compose up -d --force-recreate grok
+```
+
+**清理**（保留 ./data）：
+```powershell
+docker compose down           # 停容器
+docker compose down -v        # 同时删 network
+Remove-Item -Recurse bin/,, data/ -ErrorAction SilentlyContinue   # 连本地输出一起删
+```
+
 ---
 
 ## 命令一览
@@ -687,6 +780,23 @@ go test ./...
 go build -o bin/grok ./cmd/grok
 bash -n scripts/install.sh
 ```
+
+---
+
+## Python 实现
+
+[`python/`](python/) 目录是一套 **Python（Chromium + DrissionPage + turnstilePatch）** 实现的同款「注册 → SSO → CPA」流水线，与上面的 Go CLI 相互独立（自成 pyproject / 配置 / 账本），按需选用：
+
+```bash
+cd python
+powershell -ExecutionPolicy Bypass -File setup.ps1   # Windows；macOS / Linux 用 bash setup.sh
+# 把 config.json 的 proxy 改成你的代理端口，然后：
+uv run python -u register_cli.py --extra 1 --threads 1    # 冒烟测试
+```
+
+- 协议优先 CPA mint（SSO → 纯 HTTP Device Flow，失败回退有头浏览器），详见 `python/README.md`
+- 存量号批量补 CPA / SSO 存活扫描 / token 验证：`python/scripts/`
+- 一键环境脚本（自动装 uv + Python 3.13 + 依赖，生成预填配置）：`python/setup.ps1` / `python/setup.sh`
 
 ---
 
